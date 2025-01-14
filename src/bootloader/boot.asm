@@ -176,14 +176,14 @@ disk_read:
 .retry:
 	pusha								; don't know what BIOS will modify
 	stc									; in case BIOS doesn't set carry flag
-	int 13h								; carry flag cleared = success
-	jnc .done
+	int 13h								; disk services interrupt
+	jnc .done							; carry flag cleared = success
 
 	; read failed
 	popa
 	call disk_reset
-	dec di
-	test di, di
+	dec di								; decrement counter
+	test di, di							; check if zero
 	jnz .retry
 
 .fail:
