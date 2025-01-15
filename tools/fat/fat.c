@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <ctype.h>
 
 typedef uint8_t bool;
 #define true 1
@@ -43,58 +44,90 @@ typedef struct
     uint16_t CreatedTime;
     uint16_t CreatedDate;
     uint16_t LastAccessDate;
-    uint16_t FirstClusterNumHigh;
+    uint16_t FirstClusterHigh;
     uint16_t LastModifiedTime;
     uint16_t LastModifiedDate;
-    uint16_t FirstClusterNumLow;
+    uint16_t FirstClusterLow;
     uint32_t Size;
 } __attribute__((packed)) DirectoryEntry;
 
 BootSector g_BootSector;
 uint8_t* g_Fat = NULL;
 DirectoryEntry* g_RootDirectory = NULL;
+uint32_t g_RootDirectoryEnd;
 
+// Copies data from the boot sector of the floppy into "g_BootSector"
 bool readBootSector(FILE* disk)
 {
     return fread(&g_BootSector, sizeof(g_BootSector), 1, disk) > 0;
 }
 
-bool readSectors(FILE* disk, uint32_t lba, uint32_t count, void* bufferOut)
+// Starting from "lba", reads "count" sectors to "outputBuffer"
+bool readSectors(FILE* disk, uint32_t lba, uint32_t count, void* outputBuffer)
 {
     bool ok = true;
     ok = ok && (fseek(disk, lba * g_BootSector.BytesPerSector, SEEK_SET) == 0);
-    ok = ok && (fread(bufferOut, g_BootSector.BytesPerSector, count, disk) == count);
+    ok = ok && (fread(outputBuffer, g_BootSector.BytesPerSector, count, disk) == count);
     return ok;
 }
 
+// Allocates memory required for one FAT, then reads the first FAT to "g_Fat"
 bool readFat(FILE* disk)
 {
-    g_Fat = malloc(g_BootSector.SectorsPerFat * g_BootSector.BytesPerSector);
+    g_Fat = (uint8_t*) malloc(g_BootSector.SectorsPerFat * g_BootSector.BytesPerSector);
     return readSectors(disk, g_BootSector.ReservedSectors, g_BootSector.SectorsPerFat, g_Fat);
 }
 
+// Reads from "disk" into "g_RootDirectory"
 bool readRootDirectory(FILE* disk)
 {
     uint32_t lba = g_BootSector.ReservedSectors + g_BootSector.SectorsPerFat * g_BootSector.FatCount;
     uint32_t size = sizeof(DirectoryEntry) * g_BootSector.DirEntryCount;
     uint32_t sectors = size / g_BootSector.BytesPerSector;
+    
+    // Round up because can only read whole sectors
     if (size % g_BootSector.BytesPerSector > 0) {
         sectors++;
     }
 
+    g_RootDirectoryEnd = lba + sectors;
     g_RootDirectory = (DirectoryEntry*) malloc(sectors * g_BootSector.BytesPerSector);
     return readSectors(disk, lba, sectors, g_RootDirectory);
 }
 
 DirectoryEntry* findFile(const char* name)
 {
-    for (uint32_t i = 0; i < g_BootSector.DirEntryCount; i++) {
+    for (uint32_t i = 0; i < g_BootSector.DirEntryCount; i++)
+    {
         if (memcmp(name, g_RootDirectory[i].Name, 11) == 0) {
             return &g_RootDirectory[i];
         }
     }
 
     return NULL;
+}
+
+bool readFile(DirectoryEntry* fileEntry, FILE* disk, uint8_t* outputBuffer)
+{
+    bool ok = true;
+    uint16_t currentCluster = fileEntry->FirstClusterLow;
+
+    do {
+        uint32_t lba = g_RootDirectoryEnd + (currentCluster - 2) * g_BootSector.SectorsPerCluster;
+        ok = ok && readSectors(disk, lba, g_BootSector.SectorsPerCluster, outputBuffer);
+        outputBuffer += g_BootSector.SectorsPerCluster * g_BootSector.BytesPerSector;
+
+        // FAT clusters are like a linked list, where the current cluster number points to the location of the data,
+        // as well as the index of an entry in the FAT table, which holds the next cluster number.
+        uint32_t fatIndex = currentCluster * 3 / 2; // current cluster refers to index, 2 entries per 3 bytes.
+        if (currentCluster % 2 == 0)
+            currentCluster = (*(uint16_t*)(g_Fat + fatIndex)) & 0x0FFF; // 4 rightmost bits are zeroed out.
+        else
+            currentCluster = (*(uint16_t*)(g_Fat + fatIndex)) >> 4;
+
+    } while (ok && currentCluster < 0xFF8);
+
+    return ok;
 }
 
 int main(int argc, char** argv)
@@ -135,6 +168,21 @@ int main(int argc, char** argv)
         free(g_RootDirectory);
         return -5;
     }
+
+    uint8_t* buffer = (uint8_t*) malloc(fileEntry->Size + g_BootSector.BytesPerSector);
+    if (!readFile(fileEntry, disk, buffer)) {
+        fprintf(stderr, "Could not read file: %s!\n", argv[2]);
+        free(g_Fat);
+        free(g_RootDirectory);
+        return -6;
+    }
+
+    for (int i = 0; i < fileEntry->Size; i++)
+    {
+        if (isprint(buffer[i])) fputc(buffer[i], stdout);
+        else printf("<%02x>", buffer[i]);
+    }
+    printf("\n");
 
     free(g_Fat);
     free(g_RootDirectory);
