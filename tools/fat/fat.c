@@ -81,7 +81,7 @@ bool readFat(FILE* disk)
 // Reads from "disk" into "g_RootDirectory"
 bool readRootDirectory(FILE* disk)
 {
-    uint32_t lba = g_BootSector.ReservedSectors + g_BootSector.SectorsPerFat * g_BootSector.FatCount;
+    uint32_t lba = g_BootSector.ReservedSectors + g_BootSector.FatCount * g_BootSector.SectorsPerFat;
     uint32_t size = sizeof(DirectoryEntry) * g_BootSector.DirEntryCount;
     uint32_t sectors = size / g_BootSector.BytesPerSector;
     
